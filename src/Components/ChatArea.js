@@ -40,10 +40,15 @@ import { useCustomToast } from '../hooks/useCustomToast';
 import { useAuth } from '../contexts/AuthContext';
 import ReactMarkdown from 'react-markdown';
 import { useClipboard } from '@chakra-ui/react';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// OpenRouter API configuration
-const OPENROUTER_API_KEY = process.env.REACT_APP_OPENROUTER_API_KEY;
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+// Google Gemini API configuration
+const GOOGLE_API_KEY = process.env.REACT_APP_GOOGLE_API_KEY;
+const GEMINI_TEXT_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+
+if (!GOOGLE_API_KEY) {
+  console.error('Google API key is not configured. Please check your .env file.');
+}
 
 // Rate limiting configuration
 const MAX_RETRIES = 3;
@@ -259,65 +264,60 @@ const ChatArea = ({ chatId }) => {
 
   const makeApiCall = async (messages, currentRetry = 0) => {
     try {
-      if (!OPENROUTER_API_KEY) {
-        throw new Error('OpenRouter API key is not configured');
+      if (!GOOGLE_API_KEY) {
+        throw new Error('Google API key is not configured');
       }
 
-      const response = await fetch(OPENROUTER_API_URL, {
+      // Format messages for Gemini
+      const formattedMessages = messages.map(msg => msg.content).join('\n');
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'X-goog-api-key': GOOGLE_API_KEY
+      };
+
+      const data = {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": systemPrompt
+              },
+              {
+                "text": formattedMessages
+              }
+            ]
+          }
+        ]
+      };
+
+      const response = await fetch(GEMINI_TEXT_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-          'HTTP-Referer': window.location.origin,
-          'X-Title': 'Leeybase AI',
-        },
-        body: JSON.stringify({
-          model: 'deepseek/deepseek-chat-v3-0324:free',
-          messages,
-          temperature: 0.7,
-          max_tokens: 1024,
-          top_p: 0.95,
-          stream: true
-        }),
+        headers: headers,
+        body: JSON.stringify(data)
       });
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        
-        if (response.status === 429 && currentRetry < MAX_RETRIES) {
-          const delay = calculateBackoff(currentRetry);
-          setRetryCount(currentRetry + 1);
-          
-          // Show retry toast
-          toast({
-            title: 'Rate limit reached',
-            description: `Retrying in ${Math.round(delay/1000)} seconds... (Attempt ${currentRetry + 1}/${MAX_RETRIES})`,
-            status: 'info',
-            duration: delay,
-          });
-
-          await new Promise(resolve => setTimeout(resolve, delay));
-          return makeApiCall(messages, currentRetry + 1);
-        }
-
-        if (response.status === 429) {
-          throw new Error('Rate limit exceeded. Please wait a few minutes before trying again.');
-        }
-
-        throw new Error(error.message || `API Error: ${response.status}`);
+        throw new Error(`API Error: ${response.status} ${response.statusText}`);
       }
 
-      // Reset retry count on successful request
-      setRetryCount(0);
-      return response;
-    } catch (error) {
-      if (error.message.includes('Rate limit') || currentRetry >= MAX_RETRIES) {
-        throw error;
+      const result = await response.json();
+      
+      if (result.candidates && result.candidates.length > 0) {
+        const content = result.candidates[0].content;
+        if (content.parts && content.parts.length > 0) {
+          return content.parts[0].text;
+        }
       }
       
-      const delay = calculateBackoff(currentRetry);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return makeApiCall(messages, currentRetry + 1);
+      throw new Error('Unexpected response format from Gemini API');
+    } catch (error) {
+      if (error.message.includes('Rate limit') && currentRetry < MAX_RETRIES) {
+        const delay = calculateBackoff(currentRetry);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return makeApiCall(messages, currentRetry + 1);
+      }
+      throw error;
     }
   };
 
@@ -353,51 +353,16 @@ const ChatArea = ({ chatId }) => {
       ];
 
       const response = await makeApiCall(messages);
-      const reader = response.body.getReader();
-      let accumulatedResponse = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = new TextDecoder().decode(value);
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-          if (line.trim() === '') continue;
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') continue;
-
-            try {
-              const parsed = JSON.parse(data);
-              const content = parsed.choices[0]?.delta?.content || '';
-              if (content) {
-                accumulatedResponse += content;
-                setVisibleMessages(prev => 
-                  prev.map(msg => 
-                    msg.id === typingId 
-                      ? { ...msg, content: accumulatedResponse }
-                      : msg
-                  )
-                );
-              }
-            } catch (e) {
-              console.error('Error parsing chunk:', e);
-            }
-          }
-        }
-      }
-
+      
       // Remove typing indicator and add final response
       setVisibleMessages(prev => prev.filter(msg => msg.id !== typingId));
       const assistantMessage = { 
         role: 'assistant', 
-        content: accumulatedResponse, 
+        content: response,
         id: `response-${messageId}` 
       };
       setVisibleMessages(prev => [...prev, assistantMessage]);
-      await sendMessage(accumulatedResponse, false, null, 'assistant', chatId);
+      await sendMessage(response, false, null, 'assistant', chatId);
       
       setInput('');
     } catch (error) {
