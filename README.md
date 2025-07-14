@@ -22,7 +22,7 @@ A bilingual (English/Amharic) Telegram bot powered by Google's Gemini AI, design
 
 1. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/ethiopian-ai-bot.git
+git clone https://github.com/esa-yas/leeybase.git
 cd ethiopian-ai-bot
 ```
 
